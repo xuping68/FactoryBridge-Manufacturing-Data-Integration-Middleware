@@ -1,0 +1,18 @@
+{
+  "sourceSystem": "MES_A",
+  "sourceRecordId": "MES-A-20260910-000001",
+  "plantCode": "KH01",
+  "productionLine": "CELL-LINE-01",
+  "stationCode": "COATING-03",
+  "equipmentId": "EQ-CT-003",
+  "equipmentType": "COATING_MACHINE",
+  "lotNumber": "LOT-20260910-0012",
+  "batchNumber": "BATCH-00192",
+  "metricCode": "TEMP",
+  "metricName": "Chamber Temperature",
+  "value": "95.36",
+  "unit": "F",
+  "eventTime": "2026/09/10 14:30:22",
+  "qualityStatus": "OK",
+  "operatorId": "OP1024"
+}

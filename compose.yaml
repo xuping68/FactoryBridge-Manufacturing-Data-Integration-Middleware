@@ -1,0 +1,50 @@
+name: factorybridge
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: factorybridge
+      POSTGRES_USER: factorybridge
+      POSTGRES_PASSWORD: factorybridge_demo
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factorybridge -d factorybridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  simulator:
+    build:
+      context: ./demo
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - simulator-data:/data
+    init: true
+
+  app:
+    build:
+      context: .
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/factorybridge
+      SPRING_DATASOURCE_USERNAME: factorybridge
+      SPRING_DATASOURCE_PASSWORD: factorybridge_demo
+      FACTORYBRIDGE_EXTERNAL_BASE_URL: http://simulator:8080
+      FACTORYBRIDGE_DOWNSTREAM_BASE_URL: http://simulator:8080
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      simulator:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 30s
+
+volumes:
+  postgres-data:
+  simulator-data:
