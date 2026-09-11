@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: factorybridge
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/factorybridge}
+    username: ${SPRING_DATASOURCE_USERNAME:factorybridge}
+    password: ${SPRING_DATASOURCE_PASSWORD:factorybridge_demo}
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 3000
+      data-source-properties:
+        socketTimeout: 5
+        options: "-c statement_timeout=5000 -c lock_timeout=3000"
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+server:
+  shutdown: graceful
+  tomcat:
+    max-swallow-size: 64KB
+    connection-timeout: 5s
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        readiness:
+          include: readinessState,db
+factorybridge:
+  external:
+    base-url: ${FACTORYBRIDGE_EXTERNAL_BASE_URL:http://localhost:8090}
+  downstream:
+    base-url: ${FACTORYBRIDGE_DOWNSTREAM_BASE_URL:http://localhost:8090}
+  delivery:
+    enabled: true
+    poll-delay-ms: 1000
+    batch-size: 10
+    lease-duration: 30s
+    max-attempts: 5
+    initial-delay: 2s
+    max-delay: 60s
+logging:
+  pattern:
+    level: "%5p [correlationId=%X{correlationId:-}]"
