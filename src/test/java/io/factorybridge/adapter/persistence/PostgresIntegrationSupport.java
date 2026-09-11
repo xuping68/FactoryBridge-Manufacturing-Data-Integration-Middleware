@@ -29,7 +29,9 @@ abstract class PostgresIntegrationSupport {
     // 測試 JVM 共用一個真正的 PostgreSQL；Ryuk 負責 JVM 結束時清理。
     // Docker 不可用時直接失敗，避免沒有驗證 DB 卻回報成功。
     private static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:17-alpine");
+            new PostgreSQLContainer<>("postgres:17-alpine")
+                    .withDatabaseName("factorybridge")
+                    .withUsername("factorybridge");
 
     static {
         POSTGRES.start();

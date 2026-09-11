@@ -21,6 +21,9 @@ spring:
           time_zone: UTC
   flyway:
     enabled: true
+    # PostgreSQL 的 "$user", public 搜尋路徑會在同名 schema 建立後改變。
+    # 固定歷史紀錄位置，重啟不會把既有資料誤認為尚未 migration 的資料庫。
+    default-schema: public
   jackson:
     serialization:
       write-dates-as-timestamps: false
