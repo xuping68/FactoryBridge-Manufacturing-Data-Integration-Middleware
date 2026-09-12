@@ -19,6 +19,7 @@
 | 日期奈秒與 DB 微秒精度不一致；極大重試 duration 可能溢位 | 明確截斷到微秒；retry 設定範圍與飽和計算 | MeasurementTimeNormalizationTest、DeliveryRetryPolicyTest |
 | Swagger 必填／範例與真實驗證不一致 | 外部 schema 註明 required、長度、大小寫、單位與時間契約；不把 Bean Validation 移到 raw 留存之前 | ExternalMeasurementDto |
 | 容器 readiness 預設只表示生命週期，未反映 DB | readiness group 包含 db；JPA schema 使用 validate；Flyway 管理 migration | application.yml、Compose smoke |
+| CI 建置重複安裝基底映像已有的 curl，多了一個 Ubuntu 套件來源等待點 | 直接驗證 curl 存在，保留非 root 使用者與 readiness；減少無必要的建置網路相依 | Dockerfile、原始 Temurin 映像檢查、ARM64 Compose 重建 |
 
 ## 工程判斷
 

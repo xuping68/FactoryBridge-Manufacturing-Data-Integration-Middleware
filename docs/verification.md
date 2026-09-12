@@ -71,4 +71,4 @@ WHERE m.numeric_value <> f.numeric_value
 
 未執行大型流量、長時間 soak、真實 MES／正式下游驗收、跨獨立 DWH 網路故障或安全滲透測試；不宣稱已通過真實工廠 production readiness。這些限制與下一輪工作列在 [設計決策](decisions.md) 與 [面試官 Review](interviewer-review.md)。
 
-GitHub CI 的執行狀態請以 repository 的 Actions 頁面為準；本表記錄的是上述本機實測，沒有把尚未執行的遠端 workflow 算成通過。
+初次完整 [GitHub CI](https://github.com/xuping68/FactoryBridge-Manufacturing-Data-Integration-Middleware/actions/runs/34598663236) 已通過 Java／PostgreSQL 測試、模擬器測試、容器建置與完整故障恢復展示。該次建置的系統套件步驟等待較久；後續移除重複安裝基底映像已有的 curl，並以 ARM64 Compose 重建確認三個服務 healthy。最新 commit 的 CI 狀態請以 repository 的 Actions 頁面為準。

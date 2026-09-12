@@ -8,8 +8,8 @@ RUN mvn -B -ntp package
 
 FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
+# Temurin 已提供 curl；直接驗證健康檢查依賴，避免重複安裝造成額外套件來源故障點。
+RUN command -v curl \
     && groupadd --system factorybridge \
     && useradd --system --gid factorybridge --no-create-home factorybridge
 COPY --from=build --chown=factorybridge:factorybridge /workspace/target/factorybridge-1.0.0.jar /app/factorybridge.jar
