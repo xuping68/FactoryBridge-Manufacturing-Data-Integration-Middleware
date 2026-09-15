@@ -15,6 +15,7 @@ FactoryBridge 將「接受一筆量測」與「送達各目的地」分開。API
 | [JpaMeasurementStore](../src/main/java/io/factorybridge/adapter/persistence/JpaMeasurementStore.java) | canonical 去重、outbox 建立與 staging 更新的單一交易 |
 | [DeliveryDispatcher](../src/main/java/io/factorybridge/application/DeliveryDispatcher.java) | 認領 delivery、呼叫目的地 port、依錯誤分類排程重試 |
 | [JdbcDeliveryStore](../src/main/java/io/factorybridge/adapter/persistence/JdbcDeliveryStore.java) | PostgreSQL 認領、lease fencing 與 delivery 狀態轉移 |
+| [JdbcWarehouseWriter](../src/main/java/io/factorybridge/adapter/persistence/JdbcWarehouseWriter.java) | 在獨立交易內取得共用維度鍵，冪等寫入分析 fact |
 
 ```mermaid
 flowchart TD
@@ -32,6 +33,8 @@ flowchart TD
     Dispatch --> Warehouse[WarehouseWriter]
     Dispatch --> Downstream[DownstreamClient]
     Warehouse --> Fact[warehouse.fact_measurement]
+    Fact -->|equipment_key| Equipment[warehouse.dim_equipment]
+    Fact -->|date_key| Date[warehouse.dim_date]
     Downstream --> Transform[下游 v1 DTO + Idempotency-Key]
 ```
 
@@ -71,7 +74,7 @@ HTTP / scheduler adapter → application → domain
 | `recordRejection` | `REQUIRES_NEW`，只更新 `RECEIVED` | 不覆蓋 `ACCEPTED` / `DUPLICATE`；若稽核更新也失敗，保留原始錯誤並附加 suppressed cause |
 | `claimDueDeliveries` | 短交易，`FOR UPDATE SKIP LOCKED` | 每筆認領取得新 token，提交後才做 I/O |
 | HTTP 下游送件 | 不持有 DB 交易 | 依持久化 delivery 狀態重試 |
-| `writeMeasurement` | warehouse 獨立交易 | 與 operational acknowledgement 分開，故須容忍重送 |
+| `writeMeasurement` | warehouse 獨立交易：equipment / date dimension 與 fact | 任一步失敗全部回滾；與 operational acknowledgement 分開，故須容忍重送 |
 | `markDelivered` / `markFailed` | 短交易，比對 delivery ID、`IN_FLIGHT` 與 lease token | 舊 worker 的遲到結果不會覆寫新 worker 的狀態 |
 
 Flyway history 固定放在 `public` schema；PostgreSQL 預設搜尋路徑含 `$user`，若不固定，首次 migration 建立與帳號同名的 `factorybridge` schema 後，下次啟動可能到不同位置找 history。此修正不使用 baseline，也不刪除既有資料。
@@ -145,7 +148,54 @@ claim 本身不以 `maxAttempts` 拒絕過期 lease。若每次認領後都崩�
 
 查詢量測依 `createdAt DESC, id DESC` 穩定排序；delivery 查詢依 `createdAt, id`。認領依 `nextAttemptAt, id`。排序可重現，但不保證依 `measuredAt`、設備或來源記錄嚴格順序交付；不同目的地也可能先後不同。
 
-## 7. 可替換的邊界與現有取捨
+## 7. Operational Model 與 Analytical Model
+
+Operational DB 以 `CanonicalMeasurement` 表示不可變量測，配合 staging 與 outbox 支持接收、追查、去重及重送。Analytical Model 以「一筆量測」為 fact 粒度，把設備與日期屬性抽出為共用維度，讓跨日、跨廠的彙總有一致分組鍵。兩者服務不同查詢目的，分析需求不應反向增加 domain 的 warehouse key 或 JPA 關聯。
+
+```mermaid
+flowchart TD
+    Operational[Operational DB] --> Canonical[Canonical Measurement]
+    Canonical --> Writer[Warehouse Writer]
+    Writer --> Fact[FactMeasurement：一筆量測]
+    Fact -->|equipment_key FK| Equipment[DimEquipment：設備／廠區／產線／站點]
+    Fact -->|date_key FK| Date[DimDate：UTC 日曆日期]
+```
+
+| 表 | 粒度與欄位 |
+|---|---|
+| `dim_equipment` | `(plant_code, equipment_id)` 唯一；`equipment_key` 是 bigint surrogate PK；設備類型、line / station 為維度屬性 |
+| `dim_date` | 一個 UTC 日期；`date_key = YYYYMMDD`、唯一 `full_date`，另有 year / quarter / month / day |
+| `fact_measurement` | `measurement_id` PK；equipment / date FK、metric_type、numeric_value、standard_unit、quality_status、measured_at、source、source_record_id、loaded_at；不重複 dimension attribute |
+
+`JdbcWarehouseWriter` 使用同一個 `REQUIRES_NEW`、`READ_COMMITTED` 交易，依序執行：
+
+1. 以 `(plant_code, equipment_id)` 嘗試新增設備 dimension，再查出 surrogate key。
+2. 將 `measuredAt` 以 `ZoneOffset.UTC` 轉成日期，嘗試新增該 `YYYYMMDD` dimension。
+3. 帶著兩個 key 寫入 fact，以 `ON CONFLICT (measurement_id) DO NOTHING` 保持重送冪等。
+
+Dimension 使用 business key unique constraint 與 `ON CONFLICT DO NOTHING`，不採會競爭的「先查沒有，再新增」方式。遇到另一交易先建立設備，`READ_COMMITTED` 讓後續查詢讀到其已提交 key；維度與 fact 任何一步失敗都回滾，仍映射為 `DATA_WAREHOUSE_WRITE_FAILED`。Outbox 及 retry 不需要理解倉儲結構。
+
+設備屬性採 **Type 0**：同一 business key 首次成功載入後保持不變，避免延遲量測或 replay 改寫分類。因此維度不是設備最新主檔，也不是每筆量測當時位置的歷史；原 canonical 保留當筆設備資訊。若需求改為設備搬站前後的歷史分類，才需要正式主檔契約與 SCD 設計。
+
+日期使用 UTC 的量測日，與載入時間 `loaded_at` 無關；Java 與 V2 backfill 都明確指定 UTC，不依賴主機或 PostgreSQL session timezone。來源 MES 時間解析政策仍不變。正式製造環境通常應依 **Plant Business Timezone** 建立日期維度，並處理跨日輪班的分析需求。
+
+[warehouse-analysis.sql](../demo/warehouse-analysis.sql) JOIN fact、equipment、date，依日與設備統計 `WARNING` / `BAD` 筆數。分組包含 equipment key，不會把不同廠區同名設備混在一起；只查已送達 warehouse 的資料，不會把尚待 outbox 重試的量測算成已載入。
+
+### V1 → V2：保留資料的明確升級
+
+[V2 migration](../src/main/resources/db/migration/V2__create_warehouse_star_schema.sql) 保留原 V1 內容與 checksum，在同一 PostgreSQL / Flyway 交易執行以下步驟：
+
+1. 鎖住既有 fact，完整複製為 `warehouse.fact_measurement_v1_archive`，保存每筆 V1 的所有欄位。
+2. 建立設備／日期維度；同廠同設備以 `loaded_at, measurement_id` 最早的一筆提供固定的 Type 0 屬性；日期以 `measured_at AT TIME ZONE 'UTC'` backfill。
+3. 在原 fact 新增並補齊 equipment / date key，加入 NOT NULL、FK 與 index，再移除已抽出的維度屬性及 lot / batch 欄位。
+
+量測 ID、數值、品質、量測／載入時間及來源識別在 fact 中保留；原屬性與 lot / batch 的逐筆值保存在 archive，避免直接丟失。Archive 僅供既有資料遷移後追查，不參與新寫入或 analytical query，也不是新的 product / lot dimension。保留它會額外占用一份 V1 fact 空間；正式系統需定義期限、備份與清理權限。
+
+Fresh DB 先 V1 再 V2，archive 為空；既有 volume 就地升級，不採 baseline 或清空資料。V1 writer 不相容新 fact 欄位，因此先停止舊 app，再啟動新版；此 Demo 採短暫停機，不實作雙版本並存的 expand / contract deployment。DDL 與 backfill 任一步失敗會一起回滾，Flyway 不將 V2 標為成功。
+
+這是**簡化 Star Schema**；刻意沒有 SCD Type 2、Shift / Product / Recipe Dimension、Full Enterprise Data Warehouse 或 OLAP Engine。它展示模型邊界、維度共用與可執行分析，不假定已具備完整製造業數據平台能力。
+
+## 8. 可替換的邊界與現有取捨
 
 更換外部 JSON 版本時調整 decoder / external mapper；新增來源的時區或量測規則時，才改對應 domain 規則與測試。更換下游契約只需修改 transformer / HTTP adapter。改接獨立 warehouse 時實作 `WarehouseWriter`、配置獨立 datasource / transaction manager，並保持同一 measurement ID 的冪等寫入。
 

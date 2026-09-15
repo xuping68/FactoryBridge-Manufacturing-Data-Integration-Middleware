@@ -1,6 +1,35 @@
 # 驗證紀錄
 
-本紀錄只列實際完成的檢查。驗證日期：2026-09-11。環境為 macOS Apple Silicon、Java 21、Maven 3.9.11、Colima / Linux ARM64 Docker、PostgreSQL 17。原始建置報告可在本機 target 或 GitHub Actions 的 verification-evidence artifact 取得；不將含本機路徑的大型 log 提交到 repository。
+本紀錄只列實際完成的檢查。環境為 macOS Apple Silicon、Java 21、Maven 3.9.11、Colima / Linux ARM64 Docker、PostgreSQL 17。原始建置報告可在本機 target 或 GitHub Actions 的 verification-evidence artifact 取得；不將含本機路徑的大型 log 提交到 repository。
+
+## 2026-09-15：Star Schema 增量驗證
+
+實際執行 `./mvnw clean verify spotless:check`，**326 tests/rules 全部通過，0 failures、0 errors、0 skipped**：原有 293 項非容器測試，及 33 項 PostgreSQL 整合測試。相較初版新增 8 個案例；原有測試保留，重啟檢查更新為兩個 Flyway 版本。Python 模擬器 8 項測試也全部通過。
+
+新增案例涵蓋首次建立維度與 fact、同廠共用／跨廠區分設備、共用日期、Type 0 屬性固定、JVM 與 DB session 都非 UTC 時的日期歸屬、並發相同／不同 measurement ID、直接執行展示分析 SQL，以及有資料的 V1 → V2 migration。原有倉儲失敗案例另確認 dimension 與 fact 一起回滾。Migration 測試保留全部舊欄位，核對值與 loaded_at、FK、固定 backfill 順序、非 UTC 日界線及再次 migrate 不變；其資料刻意沒有 operational 對應列。
+
+第一次升級測試發現 PostgreSQL JDBC 會以 JVM 時區覆寫 session，單設 server timezone 無法建立預期測試條件。測試改在每條連線初始化時明確設定非 UTC，再完整重跑；不是放寬 UTC 結果斷言。
+
+實際保留舊 Compose volume，停止舊 app 後執行 `docker compose up --build --wait --wait-timeout 180`，三個服務均 healthy。升級前 15 筆 V1 fact 在升級後仍為 15 筆；archive 與升級前依 measurement_id 排序匯出的全部 JSON 列逐筆一致，量測與來源欄位（含 loaded_at）差異 0，Flyway V1 / V2 均成功。新建空白資料庫的 V1 / V2 路徑由 Testcontainers 的 application 啟動與 warehouse 測試驗證。
+
+完整 `python3 demo/smoke-test.py` 通過，包括 RETRY 自動恢復及 DEAD 人工重送；correlationId 為 `smoke-f543b7f3c1a04aeb`。之後透過既有 API 加入 4 筆合成分析資料（`STAR-DEMO-20260915-1` 至 `-4`），包含兩廠共用設備代碼、UTC 跨日、WARNING / BAD / GOOD；全部交付成功。最終 24 筆 canonical = 24 筆 fact、15 筆 archive、3 筆設備維度、3 筆日期維度、未完成 delivery 0。
+
+實際執行交付的 [分析 SQL](../demo/warehouse-analysis.sql)：
+
+```sh
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+  -U factorybridge -d factorybridge < demo/warehouse-analysis.sql
+```
+
+| date | equipment_id | equipment_type | plant_code | abnormal_count |
+| --- | --- | --- | --- | ---: |
+| 2026-09-10 | EQ-CT-003 | COATING_MACHINE | KH01 | 4 |
+| 2026-09-14 | EQ-STAR-001 | COATING_MACHINE | KH01 | 2 |
+| 2026-09-14 | EQ-STAR-001 | COATING_MACHINE | TN01 | 1 |
+
+第一列包含歷次 smoke 留存資料；後兩列證明不同廠區的同名設備不會合併，9 月 15 日的 GOOD 不計入異常。結果隨 Demo 累積資料增加；報表只統計已成功入倉的 WARNING / BAD。
+
+## 2026-09-11：初版驗證基線
 
 ## Build / Test / Review / Validation
 

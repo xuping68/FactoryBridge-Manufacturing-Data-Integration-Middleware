@@ -56,7 +56,8 @@ abstract class PostgresIntegrationSupport {
         jdbc.execute(
                 """
                 TRUNCATE TABLE factorybridge.staging_record, factorybridge.delivery_outbox,
-                    factorybridge.measurement, warehouse.fact_measurement
+                    factorybridge.measurement, warehouse.fact_measurement,
+                    warehouse.dim_equipment, warehouse.dim_date
                 """);
     }
 

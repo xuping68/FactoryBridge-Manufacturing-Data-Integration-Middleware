@@ -96,9 +96,9 @@
 
 **代價：** persistence adapter 明確依賴 PostgreSQL；H2 無法驗證相同的鎖、型別與交易行為。schema 由 Flyway 管理，Hibernate 只 `validate`；測試使用真正 PostgreSQL Testcontainers。
 
-## ADR-010：warehouse 共用 cluster，只展示整合邊界
+## ADR-010：warehouse 共用 cluster，分析模型維持 adapter 邊界
 
-**決策：** `warehouse.fact_measurement` 是同一 PostgreSQL cluster 的另一個 schema，採反正規化 fact table。writer 用獨立交易；fact 不建立指向 operational table 的 FK。
+**決策：** warehouse 使用同一 PostgreSQL cluster 的另一個 schema。V1 為反正規化 fact table；V2 調整為 `dim_equipment`、`dim_date` 與 `fact_measurement` 的簡化 Star Schema，詳見 ADR-012。Writer 用獨立交易；fact 只參照 warehouse 內的 dimension，不建立指向 operational table 的 FK。
 
 **理由：** 讓 macOS Apple Silicon 可透過簡單 Compose 展示整條流程，而不需要另一個大型分析平台。無跨 schema FK 可讓 warehouse 的生命週期與 operational tables 分開。
 
@@ -112,3 +112,23 @@
 PostgreSQL 預設 search_path 為 `$user, public`。Demo 帳號為 factorybridge；首次 migration 前同名 schema 尚未存在，Flyway history 會在 public；建立 factorybridge schema 後，第二次啟動的預設 schema 卻可能改變。
 
 明確設定 `spring.flyway.default-schema=public`，使空白 DB 與既有 DB 都到同一位置查 history。Operational／warehouse 表仍用 schema-qualified SQL。測試以同名 DB 角色啟動，保存資料後真正建立第二個 application context；不採 baselineOnMigrate 或清空資料避開錯誤。
+
+## ADR-012：簡化 Star Schema、固定維度政策與保留 V1 資料
+
+**決策：** Operational Model 保留不可變 canonical 與整合狀態；Analytical Model 將一筆 measurement 作為 fact 粒度，以設備 surrogate key 與日期 key 連結 dimension。這次改動只影響 warehouse adapter、migration、分析 SQL 與其測試，不把分析 key 加進 domain 或既有 API。
+
+**設備識別：** `dim_equipment.equipment_key` 使用 bigint surrogate PK；`(plant_code, equipment_id)` 使用 unique business key，避免把不同廠區的同名設備合併。equipment_type、line_code、station_code 採 Type 0，首次成功載入後不更新。這不是最新 master data，也不描述每筆量測發生時的設備位置；canonical 仍保存每筆原屬性。
+
+**選擇 Type 0 的理由：** Demo 沒有設備主檔版本與搬站生效時間；以最後收到的 measurement 覆寫 dimension 會被延遲事件與 replay 影響。固定首次屬性能清楚展示維度共用，也能讓重送不改寫既有分析分類。若要回答搬站前後歷史，應先定義有效期間與來源主檔，再評估 SCD Type 2，而非以 ingestion 順序猜測。
+
+**日期：** `date_key = YYYYMMDD`，`full_date` 唯一，另保存 year、quarter、month、day。Writer 使用 `ZoneOffset.UTC`；migration 使用 `AT TIME ZONE 'UTC'`，兩者以 measuredAt 判斷日期，不受 server default / DB session timezone 影響。這與來源字串的解析時區是不同責任。正式製造環境通常應依 Plant Business Timezone 建立日期維度；本版沒有 shift calendar。
+
+**寫入與冪等：** 在同一獨立 warehouse 交易依序建立或取得 equipment、date，再寫 fact。Dimension 使用 unique constraint + `ON CONFLICT DO NOTHING`，接著取得 key；使用 READ COMMITTED 讀取 concurrent insert 提交後的結果。Fact 仍以 measurement ID PK / `ON CONFLICT DO NOTHING` 去重，已寫入的 fact 不覆寫；整筆交易失敗仍回報 `DATA_WAREHOUSE_WRITE_FAILED`。這保留既有 outbox 的 at-least-once 契約。
+
+**V2 升級：** 不改 V1 checksum。Migration 鎖住既有 fact，在同一 Flyway 交易完整複製為 `warehouse.fact_measurement_v1_archive`，建立及 backfill dimensions，補 fact FK 後加 constraint / index，再移除原維度與 lot / batch 欄位。同設備以 `loaded_at, measurement_id` 最早的一筆決定 Type 0 屬性，讓 backfill 有固定結果。既有 fact 的 ID、量測與來源欄位保留；被移出的每筆資訊仍在 archive，無須假定 operational DB 一定還有對應資料。
+
+**代價與部署邊界：** Archive 是一次性 V1 快照，新增量測不寫入，也不參與分析；成本是額外保留一份舊 fact。Fresh DB 依序執行 V1 / V2，archive 為空。DDL 與 backfill 失敗一起回滾；舊 writer 不相容新 schema，因此需要先停止舊 app 再升級。本版不提供零停機部署、向下相容 view 或自動 downgrade；正式遷移需另訂容量、備份與保留政策。
+
+**分析契約：** [warehouse-analysis.sql](../demo/warehouse-analysis.sql) 實際 JOIN 三張表，依 UTC 日期與設備統計已載入的 `WARNING` / `BAD`。分組包含設備 key；沒有異常的組合不輸出零值列。這是事件筆數，不是故障次數、異常率或 OEE；這些指標還需要明確分母及事件合併規則。
+
+**刻意不加入：** SCD Type 2、Shift / Product / Recipe Dimension、完整 Enterprise Data Warehouse、OLAP Engine。先用一個實際問題驗證簡化 Star Schema，避免為展示模型而加入沒有來源契約的維度。

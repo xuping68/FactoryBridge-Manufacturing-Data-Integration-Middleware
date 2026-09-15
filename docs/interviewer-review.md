@@ -20,6 +20,8 @@
 | Swagger 必填／範例與真實驗證不一致 | 外部 schema 註明 required、長度、大小寫、單位與時間契約；不把 Bean Validation 移到 raw 留存之前 | ExternalMeasurementDto |
 | 容器 readiness 預設只表示生命週期，未反映 DB | readiness group 包含 db；JPA schema 使用 validate；Flyway 管理 migration | application.yml、Compose smoke |
 | CI 建置重複安裝基底映像已有的 curl，多了一個 Ubuntu 套件來源等待點 | 直接驗證 curl 存在，保留非 root 使用者與 readiness；減少無必要的建置網路相依 | Dockerfile、原始 Temurin 映像檢查、ARM64 Compose 重建 |
+| 只有反正規化 fact，尚無實際 dimension JOIN 可展示分析模型 | 新增設備／UTC 日期維度；設備 business key 含廠區，fact 只保留量測與維度 FK | V2 migration、JdbcWarehouseWriter、warehouse-analysis.sql |
+| 直接移除舊 fact 欄位會遺失 lot / batch 與每筆設備屬性 | V2 在同一交易先保留完整 V1 archive，再 backfill 維度鍵；以固定 loaded_at / measurement_id 排序決定 Type 0 屬性 | V2 migration、ADR-012 |
 
 ## 工程判斷
 
@@ -38,7 +40,10 @@
 - 來源 key 的內容已接受後不可覆寫；correction／revision 需要獨立契約。
 - 相同 JSON 結構 fingerprint 與下游 wire bytes 去重是兩個不同邊界。
 - 品質 WARNING/BAD 留存 DWH，GOOD 才送作業下游；這是 Demo 路由政策，正式場域應與品質／製程部門確認。
-- DWH 共用 cluster 是啟動便利的取捨；沒有獨立 failure domain、完整維度模型或企業數據治理。
+- DWH 共用 cluster 是啟動便利的取捨；已實作設備／日期的簡化 Star Schema，沒有獨立 failure domain、完整企業維度模型或數據治理。
+- 設備維度是 Type 0 的首次成功載入屬性，不代表最新主檔或每筆事件當時位置；日期以 UTC 切日，正式工廠應確認 Plant Business Timezone。
+- 異常報表計算已載入的 WARNING / BAD 量測筆數，不能直接解讀成設備故障次數、異常率或 OEE。
+- V2 保留一次性的完整 V1 archive，因此不丟棄舊欄位資訊；仍有儲存成本，而且升級需停舊 app，未宣稱零停機。
 - 不保證同設備交付順序；需要 ordering 時應加入 partition key／序號與明確重送政策。
 - 保留 staging 歷史、累計 attempts、replayCount 與最後錯誤；尚未建立每次 delivery attempt 的完整事件稽核表。
 - source mapping／downstream contract 改版時，已排隊工作需要版本遷移策略；目前只提供 v1，不能直接換 wire schema 後把舊 key 視為新訊息。

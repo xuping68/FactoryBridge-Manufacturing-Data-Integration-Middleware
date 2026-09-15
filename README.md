@@ -42,7 +42,7 @@ flowchart TD
     Normalize -->|invalid| Rejected[REJECTED + errorCode + stagingId]
     Canonical --> Accept[Accept canonical + outbox + staging outcome — one transaction]
     Accept --> Worker[DeliveryDispatcher — claim with lease]
-    Worker -->|all quality states| DWH[(warehouse.fact_measurement)]
+    Worker -->|all quality states| DWH[Warehouse Writer → simplified Star Schema]
     Worker -->|GOOD only| Transform[Downstream DTO v1]
     Transform --> Downstream[Downstream HTTP + durable idempotency key]
     Worker --> Retry[RETRY → bounded backoff → DEAD → manual replay]
@@ -132,6 +132,54 @@ raw replay 產生新的 staging，不修改歷史。相同 key 已成功接受�
 
 MES 匯入的預期 source identity 與 raw 在最初同一交易留存；即使程式在驗證前崩潰、staging 仍為 RECEIVED，重跑也必須沿用原來的來源識別檢查。
 
+## 簡化 Star Schema：每天每台設備有多少異常量測？
+
+Operational Model 保存 canonical 與整合狀態，用來回答「這筆資料是否接受、是否送達」；Analytical Model 把量測 fact 與可共用的設備／日期 dimension 分開，用來回答「哪一天、哪個廠區的哪台設備出現多少異常」。倉儲結構由 [JdbcWarehouseWriter](src/main/java/io/factorybridge/adapter/persistence/JdbcWarehouseWriter.java) 轉換，不改變 domain、API 或 outbox。
+
+```mermaid
+flowchart TD
+    Operational[Operational DB：Canonical Measurement] --> Writer[Warehouse Writer]
+    Writer --> Fact[FactMeasurement]
+    Fact -->|equipment_key| Equipment[DimEquipment]
+    Fact -->|date_key| Date[DimDate]
+```
+
+| 資料表 | 欄位與鍵 |
+| --- | --- |
+| `warehouse.dim_equipment` | `equipment_key`：bigint surrogate PK；`equipment_id`、`equipment_type`、`plant_code`、`line_code`、`station_code`；business key 為 `(plant_code, equipment_id)` |
+| `warehouse.dim_date` | `date_key`：`YYYYMMDD` 整數 PK；`full_date` 唯一；`year`、`quarter`、`month`、`day` |
+| `warehouse.fact_measurement` | `measurement_id` PK；`equipment_key` / `date_key` FK；`metric_type`、`numeric_value`、`standard_unit`、`quality_status`、`measured_at`、`source`、`source_record_id`、`loaded_at` |
+
+Fact 粒度是一筆 canonical measurement，不重複保存廠區、產線或站點屬性。日期一律由 `measuredAt` 轉成 **UTC 日期**；例如 `2026-09-11T00:30:00+08:00` 歸入 `20260910`。來源時間解析仍遵守各 MES 契約，不把解析時區與分析日界線混為一談。**正式製造環境通常應依 Plant Business Timezone 建立日期維度。**
+
+設備維度採簡單的 **Type 0（首次成功載入後不覆寫）**：同廠同設備共用一個 key；不同廠區可使用相同 equipmentId。這些屬性不是最新設備主檔，也不能代表每筆歷史量測當時的位置；canonical 仍保留每筆原有資訊。此規則避免延遲到達或重送任意改寫分析分類。
+
+Writer 在同一獨立 warehouse 交易內，依 business key 建立或取得設備、建立或取得 UTC 日期，再寫 fact。Dimension unique constraint 與 `ON CONFLICT DO NOTHING` 處理重複／並發，`measurement_id` PK 讓相同量測重送只保留一筆 fact；不改變既有 at-least-once delivery 與錯誤分類。
+
+執行完整 smoke test 後，可直接查詢 `WARNING` / `BAD`，包含三張表的實際 JOIN：
+
+```sh
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+  -U factorybridge -d factorybridge < demo/warehouse-analysis.sql
+```
+
+[分析 SQL](demo/warehouse-analysis.sql) 輸出 `date`、`equipment_id`、`equipment_type`、`plant_code`、`abnormal_count`。分組包含設備 surrogate key，避免跨廠同名設備合併。結果只包含已成功送達 warehouse 的異常資料；沒有異常的日期／設備不輸出零值列。smoke test 每次建立新的來源識別，因此多次執行後筆數會累加。
+
+### 從既有 V1 資料庫升級
+
+[V2 migration](src/main/resources/db/migration/V2__create_warehouse_star_schema.sql) 不修改 V1；在同一 Flyway 交易內鎖定原 fact，先完整複製到 `warehouse.fact_measurement_v1_archive`，再建立 dimension、補 FK、加入 constraint / index，最後移除 fact 中的維度與 lot / batch 欄位。既有 fact 的量測 ID、值、品質、時間及 loadedAt 保留；被移出的每筆原屬性與 lot / batch 仍可在 archive 查到。
+
+Backfill 同廠同設備採 `loaded_at` 最早的一筆，時間相同時以 `measurement_id` 固定排序，決定 Type 0 屬性。Archive 是一次性的 V1 快照，不接收新寫入、不參與報表；保留成本是額外一份舊 fact 資料，正式環境應另訂保留期限與容量政策。Fresh DB 依序套用 V1、V2，archive 為空。
+
+舊版 writer 不相容 V2 fact 欄位，因此這次升級需要短暫停止舊 app，不宣稱零停機。保留既有 volume，執行：
+
+```sh
+docker compose stop app
+docker compose up --build --wait
+```
+
+Flyway 失敗會回滾本次 schema／backfill 變更；升級不需清空 volume 或使用 baseline。
+
 ## API 與錯誤契約
 
 | Method / path | 責任 |
@@ -184,6 +232,7 @@ X-Correlation-Id 僅接受 1–64 個安全字元，否則產生新 UUID。API r
 ./mvnw verify                     # 再加真正 PostgreSQL 的 Testcontainers IT
 ./mvnw spotless:check             # 一致的 Java 格式
 ./mvnw spotless:apply             # 主動整理格式
+./mvnw clean verify spotless:check # 完整重建、測試與格式檢查
 python3 -m unittest discover -s demo -p 'test_*.py' -v
 ```
 
@@ -199,7 +248,9 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 
 ## Demo 邊界與下一步
 
-本版刻意聚焦可讀、可驗證的單筆整合流程：沒有批次匯入、訊息 broker、分散式全域交易、依設備排序保證或完整資料倉儲星型模型。最近量測查詢是 bounded recent list，尚未提供大量資料的 cursor pagination。
+本版刻意聚焦可讀、可驗證的單筆整合流程與簡化 Star Schema：沒有批次匯入、訊息 broker、分散式全域交易或依設備排序保證。最近量測查詢是 bounded recent list，尚未提供大量資料的 cursor pagination。
+
+分析模型刻意沒有加入 SCD Type 2、Shift / Product / Recipe Dimension、完整 Enterprise Data Warehouse 或 OLAP Engine；目前只有設備／日期維度與單筆量測 fact，足以展示可執行的異常量測分析。
 
 DWH 與 operational store 共用一個 PostgreSQL cluster、使用不同 schema 與交易；這讓 Demo 可一鍵執行，也代表不是獨立 failure domain。WarehouseWriter 已隔離，換成另一座 DB 或 API 不需改 domain。
 

@@ -41,7 +41,7 @@ class ApplicationRestartIT extends PostgresIntegrationSupport {
                                     .getBean(MeasurementStore.class)
                                     .findMeasurement(accepted.measurementId()))
                     .isPresent();
-            assertThat(restarted.getBean(Flyway.class).info().applied()).hasSize(1);
+            assertThat(restarted.getBean(Flyway.class).info().applied()).hasSize(2);
         }
 
         assertThat(canonicalCount()).isEqualTo(1);
