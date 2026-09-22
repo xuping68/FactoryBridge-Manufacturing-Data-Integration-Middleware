@@ -221,7 +221,7 @@ X-Correlation-Id 僅接受 1–64 個安全字元，否則產生新 UUID。API r
 - **Delivery**：網路 I/O 不持有 DB row lock。DWH 與 downstream 分開追蹤；每次只認領一筆，避免批次後段等待時 lease 已過期。
 - **Operations**：有限 timeout、bounded request body、非 root container、readiness 含 DB、優雅停止、CI 與可重跑 smoke checks。
 
-[架構與交易邊界](docs/architecture.md)｜[設計決策與取捨](docs/decisions.md)｜[面試展示步驟](demo/README.md)｜[驗證紀錄](docs/verification.md)｜[面試官 Review](docs/interviewer-review.md)
+[架構與交易邊界](docs/architecture.md)｜[Table Schema 資料字典與 ERD](docs/table-schema.md)｜[設計決策與取捨](docs/decisions.md)｜[面試展示步驟](demo/README.md)｜[驗證紀錄](docs/verification.md)｜[面試官 Review](docs/interviewer-review.md)
 
 ## 測試與建置
 

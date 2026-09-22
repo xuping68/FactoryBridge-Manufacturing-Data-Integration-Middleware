@@ -2,6 +2,8 @@
 
 FactoryBridge 將「接受一筆量測」與「送達各目的地」分開。API 回覆 `202 Accepted` 時，canonical、outbox 與 staging 成功狀態已一起提交；warehouse 或 downstream 的成功由 delivery 狀態另外表示。這個邊界避免把下游暫時故障變成資料遺失，也避免在資料庫交易內等待 HTTP。
 
+各表完整欄位、NULL / DEFAULT、主外鍵、CHECK 與索引請見 [Table Schema 資料字典與 ERD](table-schema.md)，內容以 V2 完成後的實際結構為準。
+
 ## 1. 閱讀主要流程
 
 建議從以下檔案依序閱讀；每個類別處理一個變動來源或一個清楚的流程邊界。
